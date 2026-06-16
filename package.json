@@ -1,0 +1,23 @@
+{
+  "name": "task-management-backend",
+  "version": "1.0.0",
+  "description": "Task/Todo management backend with subtasks, tags, reminders, and drag-and-drop sorting",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^8.0.0",
+    "dotenv": "^16.3.1",
+    "node-cron": "^3.0.3",
+    "cors": "^2.8.5",
+    "morgan": "^1.10.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jest": "^29.7.0"
+  }
+}
