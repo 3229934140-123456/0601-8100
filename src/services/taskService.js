@@ -215,6 +215,13 @@ class TaskService {
       await this.checkParentAutoComplete(oldParent);
     }
 
+    if (status !== undefined && status === 'completed' && oldStatus !== 'completed') {
+      if (task.recurrence && task.recurrence.enabled) {
+        const RecurrenceService = require('./recurrenceService');
+        await RecurrenceService.generateNextTask(task);
+      }
+    }
+
     return await this.getTaskWithSubtasks(task._id, userId);
   }
 
@@ -274,13 +281,25 @@ class TaskService {
     const allCompleted = subtasks.every(s => s.status === 'completed');
     const hasCompleted = subtasks.some(s => s.status === 'completed');
 
+    let parentChanged = false;
+
     if (allCompleted && parent.status !== 'completed') {
       parent.status = 'completed';
       parent.completedAt = new Date();
-      await parent.save();
-    } else if (!allCompleted && parent.status === 'completed' && hasCompleted) {
-      parent.status = 'in_progress';
+      parentChanged = true;
+    } else if (!allCompleted && parent.status === 'completed') {
+      parent.status = hasCompleted ? 'in_progress' : 'pending';
       parent.completedAt = null;
+      parentChanged = true;
+    } else if (!allCompleted && hasCompleted && parent.status === 'pending') {
+      parent.status = 'in_progress';
+      parentChanged = true;
+    } else if (!hasCompleted && parent.status === 'in_progress') {
+      parent.status = 'pending';
+      parentChanged = true;
+    }
+
+    if (parentChanged) {
       await parent.save();
     }
 

@@ -45,23 +45,11 @@ function rankBetween(prevRank, nextRank, bucket = DEFAULT_BUCKET) {
   }
   if (!prevRank) {
     const next = parseRank(nextRank);
-    const firstCharIdx = charToIndex(next.rank[0]);
-    if (firstCharIdx > 0) {
-      const rank = indexToChar(Math.floor(firstCharIdx / 2)) + BASE_36_CHARS[0].repeat(RANK_LENGTH - 1);
-      return `${next.bucket}|${rank}`;
-    }
-    const rank = BASE_36_CHARS[0] + indexToChar(Math.floor(BASE_36_CHARS.length / 2)) + BASE_36_CHARS[0].repeat(RANK_LENGTH - 2);
-    return `${next.bucket}|${rank}`;
+    return `${next.bucket}|${rankBetweenStrings('', next.rank)}`;
   }
   if (!nextRank) {
     const prev = parseRank(prevRank);
-    const lastCharIdx = charToIndex(prev.rank[prev.rank.length - 1]);
-    if (lastCharIdx < BASE_36_CHARS.length - 1) {
-      const rank = prev.rank.slice(0, -1) + indexToChar(Math.floor((lastCharIdx + BASE_36_CHARS.length - 1) / 2));
-      return `${prev.bucket}|${rank}`;
-    }
-    const rank = prev.rank + indexToChar(Math.floor(BASE_36_CHARS.length / 2));
-    return `${prev.bucket}|${rank}`;
+    return `${prev.bucket}|${rankBetweenStrings(prev.rank, '')}`;
   }
 
   const prev = parseRank(prevRank);
@@ -71,27 +59,61 @@ function rankBetween(prevRank, nextRank, bucket = DEFAULT_BUCKET) {
     throw new Error('prevRank must be less than nextRank');
   }
 
-  const maxLen = Math.max(prev.rank.length, next.rank.length);
-  const prevPadded = prev.rank.padEnd(maxLen, BASE_36_CHARS[0]);
-  const nextPadded = next.rank.padEnd(maxLen, BASE_36_CHARS[0]);
+  return `${prev.bucket}|${rankBetweenStrings(prev.rank, next.rank)}`;
+}
 
-  let carry = 1;
-  let midStr = '';
-  for (let i = maxLen - 1; i >= 0; i--) {
-    const p = charToIndex(prevPadded[i]);
-    const n = charToIndex(nextPadded[i]);
-    let sum = p + n + carry * BASE_36_CHARS.length;
-    carry = Math.floor(sum / 2 / BASE_36_CHARS.length) + (sum % 2 === 1 && i > 0 ? 1 : 0);
-    const mid = Math.floor(sum / 2) % BASE_36_CHARS.length;
-    midStr = indexToChar(mid) + midStr;
+function rankBetweenStrings(prevStr, nextStr) {
+  const BASE = BASE_36_CHARS.length;
+  const ZERO_CHAR = BASE_36_CHARS[0];
+  const LAST_CHAR = BASE_36_CHARS[BASE - 1];
+  const MID_IDX = Math.floor(BASE / 2);
+  const MID_CHAR = BASE_36_CHARS[MID_IDX];
+  const hasPrev = prevStr.length > 0;
+  const hasNext = nextStr.length > 0;
+  const maxLen = Math.max(prevStr.length, nextStr.length, RANK_LENGTH);
+  const prevPadded = hasPrev ? prevStr.padEnd(maxLen, ZERO_CHAR) : '';
+  const nextPadded = hasNext ? nextStr.padEnd(maxLen, LAST_CHAR) : '';
+
+  let result = '';
+  let prevFinished = !hasPrev;
+  let nextFinished = !hasNext;
+
+  for (let i = 0; i < maxLen; i++) {
+    const p = prevFinished ? 0 : charToIndex(prevPadded[i]);
+    const n = nextFinished ? BASE - 1 : charToIndex(nextPadded[i]);
+
+    if (p === n) {
+      result += indexToChar(p);
+      continue;
+    }
+
+    const diff = n - p;
+    if (diff > 1) {
+      result += indexToChar(p + Math.floor(diff / 2));
+      break;
+    }
+
+    if (diff === 1) {
+      if (i === maxLen - 1) {
+        result += indexToChar(p);
+        result += MID_CHAR;
+        break;
+      }
+
+      result += indexToChar(p);
+      nextFinished = true;
+      continue;
+    }
+
+    result += indexToChar(Math.max(0, p + MID_IDX));
+    break;
   }
 
-  if (carry > 0) {
-    midStr = indexToChar(carry) + midStr;
+  while (result.length < RANK_LENGTH) {
+    result += ZERO_CHAR;
   }
 
-  const finalRank = midStr.replace(/0+$/, '') || BASE_36_CHARS[0];
-  return `${prev.bucket}|${finalRank.padEnd(RANK_LENGTH, BASE_36_CHARS[0])}`;
+  return result;
 }
 
 function rebalanceRanks(ranks, bucket = DEFAULT_BUCKET) {

@@ -83,28 +83,53 @@ class RecurrenceService {
 
     const originalTaskId = task.recurrence.originalTaskId || task._id;
 
+    const taskId = typeof task._id === 'object' ? task._id.toString() : task._id;
+    const origId = typeof originalTaskId === 'object' ? originalTaskId.toString() : originalTaskId;
+
+    const existing = await Task.findOne({
+      $or: [
+        { 'recurrence.originalTaskId': origId, dueDate: nextDueDate },
+        { 'recurrence.originalTaskId': taskId, dueDate: nextDueDate },
+      ],
+      userId: task.userId,
+    });
+    if (existing) {
+      return null;
+    }
+
+    const recurrenceData = typeof task.recurrence.toObject === 'function'
+      ? task.recurrence.toObject()
+      : JSON.parse(JSON.stringify(task.recurrence));
+
+    const reminderData = task.reminder;
+    let reminderConfig = { enabled: false };
+    if (reminderData && reminderData.enabled) {
+      const dueTime = new Date(task.dueDate).getTime();
+      const remindTime = new Date(reminderData.remindAt).getTime();
+      const offset = dueTime - remindTime;
+      reminderConfig = {
+        enabled: true,
+        remindAt: new Date(nextDueDate.getTime() - offset),
+        reminded: false,
+      };
+    }
+
     const newTask = new Task({
       title: task.title,
       description: task.description,
       priority: task.priority,
       status: 'pending',
       dueDate: nextDueDate,
-      tags: [...task.tags],
-      parentTask: task.parentTask,
+      tags: [...(task.tags || [])],
+      parentTask: task.parentTask || null,
       sortRank: task.sortRank,
       userId: task.userId,
       recurrence: {
-        ...task.recurrence.toObject(),
+        ...recurrenceData,
         completedOccurrences: (task.recurrence.completedOccurrences || 0) + 1,
-        originalTaskId,
+        originalTaskId: origId,
       },
-      reminder: task.reminder ? {
-        enabled: task.reminder.enabled,
-        remindAt: task.reminder.enabled && nextDueDate
-          ? new Date(nextDueDate.getTime() - (task.dueDate - task.reminder.remindAt))
-          : null,
-        reminded: false,
-      } : { enabled: false },
+      reminder: reminderConfig,
     });
 
     await newTask.save();

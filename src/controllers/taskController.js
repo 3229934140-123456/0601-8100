@@ -77,11 +77,6 @@ class TaskController {
       const userId = req.headers['x-user-id'] || 'default';
       const { id } = req.params;
       const task = await TaskService.updateTask(id, { status: 'completed' }, userId);
-      
-      if (task.recurrence && task.recurrence.enabled) {
-        await RecurrenceService.generateNextTask(task);
-      }
-      
       res.json(task);
     } catch (error) {
       res.status(400).json({ error: error.message });
