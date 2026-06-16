@@ -18,15 +18,36 @@ class TaskService {
     }
   }
 
-  async getRecentActivity(taskId, limit = 20) {
-    return await ActivityLog.find({ taskId })
+  async getRecentActivity(taskId, opts = {}, userId = 'default') {
+    const { actor = null, relatedTo = null, limit = 20 } = opts;
+    const task = await Task.findOne({ _id: taskId, userId });
+    if (!task) return null;
+    const filter = { taskId };
+    if (actor) filter.actor = actor;
+    if (relatedTo) {
+      filter.$or = [
+        { actor: relatedTo },
+        { 'details.mentions': relatedTo },
+        { 'details.added': { $in: [relatedTo] } },
+        { 'details.removed': { $in: [relatedTo] } },
+        { 'details.to': relatedTo },
+        { 'details.from': relatedTo },
+      ];
+    }
+    return await ActivityLog.find(filter)
       .sort({ createdAt: -1 })
       .limit(limit)
       .lean();
   }
 
-  async getComments(taskId, limit = 50) {
-    return await Comment.find({ taskId })
+  async getComments(taskId, opts = {}, userId = 'default') {
+    const { author = null, mention = null, limit = 50 } = opts;
+    const task = await Task.findOne({ _id: taskId, userId });
+    if (!task) return null;
+    const filter = { taskId };
+    if (author) filter.author = author;
+    if (mention) filter.mentions = mention;
+    return await Comment.find(filter)
       .sort({ createdAt: -1 })
       .limit(limit)
       .lean();
@@ -37,13 +58,25 @@ class TaskService {
     if (!task) {
       throw new Error('Task not found');
     }
+    const mentionRegex = /@([\w\u4e00-\u9fa5.-]+)/g;
+    const mentions = [];
+    let m;
+    while ((m = mentionRegex.exec(content)) !== null) {
+      if (!mentions.includes(m[1])) mentions.push(m[1]);
+    }
     const comment = new Comment({
       taskId,
       content,
       author,
+      mentions,
     });
     await comment.save();
-    await this.logActivity(taskId, 'comment_add', { commentId: comment._id, author, content: content.slice(0, 100) }, author);
+    await this.logActivity(taskId, 'comment_add', {
+      commentId: comment._id,
+      author,
+      content: content.slice(0, 100),
+      mentions,
+    }, author);
     return comment.toObject();
   }
 
@@ -143,34 +176,36 @@ class TaskService {
 
     this.attachProgress(taskObj);
 
-    taskObj.recentActivity = await this.getRecentActivity(taskId, 20);
-    taskObj.comments = await this.getComments(taskId, 50);
+    const activity = await this.getRecentActivity(taskId, { limit: 20 }, userId);
+    taskObj.recentActivity = activity !== null ? activity : [];
+    const comments = await this.getComments(taskId, { limit: 50 }, userId);
+    taskObj.comments = comments !== null ? comments : [];
 
     return taskObj;
   }
 
   attachProgress(taskObj) {
-    if (taskObj.subtasks && taskObj.subtasks.length > 0) {
-      let totalAll = 0;
-      let completedAll = 0;
+    const flattenSubtasks = (node) => {
+      if (!node.subtasks || node.subtasks.length === 0) return [];
+      const flat = [];
+      for (const sub of node.subtasks) {
+        flat.push(sub);
+        flat.push(...flattenSubtasks(sub));
+      }
+      return flat;
+    };
+    const all = flattenSubtasks(taskObj);
+    const completed = all.filter(s => s.status === 'completed').length;
+    taskObj.progress = {
+      totalSubtasks: all.length,
+      completedSubtasks: completed,
+      uncompletedSubtasks: all.length - completed,
+      completionPercentage: all.length > 0 ? Math.round((completed / all.length) * 100) : 0,
+    };
+    if (taskObj.subtasks) {
       for (const sub of taskObj.subtasks) {
         this.attachProgress(sub);
-        totalAll += (sub.progress.totalSubtasks || 0) + 1;
-        completedAll += (sub.progress.completedSubtasks || 0) + (sub.status === 'completed' ? 1 : 0);
       }
-      taskObj.progress = {
-        totalSubtasks: totalAll,
-        completedSubtasks: completedAll,
-        uncompletedSubtasks: totalAll - completedAll,
-        completionPercentage: totalAll > 0 ? Math.round((completedAll / totalAll) * 100) : 0,
-      };
-    } else {
-      taskObj.progress = {
-        totalSubtasks: 0,
-        completedSubtasks: 0,
-        uncompletedSubtasks: 0,
-        completionPercentage: taskObj.status === 'completed' ? 100 : 0,
-      };
     }
     return taskObj;
   }
@@ -415,11 +450,21 @@ class TaskService {
 
   async batchUpdate(taskIds, updateData, userId = 'default') {
     const results = { succeeded: [], failed: [] };
+    const operationSummary = { fields: Object.keys(updateData) };
 
     for (const taskId of taskIds) {
       try {
         const task = await this.updateTask(taskId, updateData, userId);
-        results.succeeded.push({ taskId, task });
+        results.succeeded.push({
+          taskId,
+          title: task.title,
+          status: task.status,
+          assignee: task.assignee || null,
+          collaborators: task.collaborators || [],
+          dueDate: task.dueDate || null,
+          priority: task.priority,
+        });
+        await this.logActivity(taskId, 'update', { ...operationSummary, via: 'batch', update: updateData }, userId);
       } catch (error) {
         results.failed.push({ taskId, error: error.message });
       }
@@ -429,8 +474,9 @@ class TaskService {
       total: taskIds.length,
       succeededCount: results.succeeded.length,
       failedCount: results.failed.length,
-      succeeded: results.succeeded.map(r => r.taskId),
-      failed: results.failed.map(r => ({ taskId: r.taskId, error: r.error })),
+      succeeded: results.succeeded,
+      failed: results.failed,
+      operation: operationSummary,
     };
   }
 
@@ -507,8 +553,13 @@ class TaskService {
 
     for (const taskId of taskIds) {
       try {
+        const task = await Task.findOne({ _id: taskId, userId }).select('_id title');
+        const taskInfo = task ? { taskId, title: task.title } : { taskId, title: null };
         await this.deleteTask(taskId, userId);
-        results.succeeded.push(taskId);
+        if (taskInfo.title) {
+          await this.logActivity(taskId, 'delete', { ...taskInfo, via: 'batch' }, userId);
+        }
+        results.succeeded.push(taskInfo);
       } catch (error) {
         results.failed.push({ taskId, error: error.message });
       }
@@ -520,6 +571,7 @@ class TaskService {
       failedCount: results.failed.length,
       succeeded: results.succeeded,
       failed: results.failed,
+      operation: { fields: ['delete'] },
     };
   }
 

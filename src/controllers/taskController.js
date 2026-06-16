@@ -191,9 +191,13 @@ class TaskController {
     try {
       const userId = req.headers['x-user-id'] || 'default';
       const { id } = req.params;
-      const logs = await ReminderService.getReminderHistory(id, userId);
+      const { recipient, recipientType, limit = 50 } = req.query;
+      const logs = await ReminderService.getReminderHistory(id, userId, { recipient, recipientType, limit: parseInt(limit) });
       res.json(logs);
     } catch (error) {
+      if (error.message === 'Task not found') {
+        return res.status(404).json({ error: 'Task not found or no permission' });
+      }
       res.status(400).json({ error: error.message });
     }
   }
@@ -230,6 +234,9 @@ class TaskController {
       const comment = await TaskService.addComment(id, content.trim(), author, userId);
       res.status(201).json(comment);
     } catch (error) {
+      if (error.message === 'Task not found') {
+        return res.status(404).json({ error: 'Task not found or no permission' });
+      }
       res.status(400).json({ error: error.message });
     }
   }
@@ -238,8 +245,11 @@ class TaskController {
     try {
       const userId = req.headers['x-user-id'] || 'default';
       const { id } = req.params;
-      const { limit = 50 } = req.query;
-      const comments = await TaskService.getComments(id, parseInt(limit));
+      const { author, mention, limit = 50 } = req.query;
+      const comments = await TaskService.getComments(id, { author, mention, limit: parseInt(limit) }, userId);
+      if (comments === null) {
+        return res.status(404).json({ error: 'Task not found or no permission' });
+      }
       res.json({ comments, count: comments.length });
     } catch (error) {
       res.status(400).json({ error: error.message });
@@ -250,8 +260,11 @@ class TaskController {
     try {
       const userId = req.headers['x-user-id'] || 'default';
       const { id } = req.params;
-      const { limit = 50 } = req.query;
-      const activity = await TaskService.getRecentActivity(id, parseInt(limit));
+      const { actor, relatedTo, limit = 50 } = req.query;
+      const activity = await TaskService.getRecentActivity(id, { actor, relatedTo, limit: parseInt(limit) }, userId);
+      if (activity === null) {
+        return res.status(404).json({ error: 'Task not found or no permission' });
+      }
       res.json({ activity, count: activity.length });
     } catch (error) {
       res.status(400).json({ error: error.message });

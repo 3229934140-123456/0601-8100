@@ -29,11 +29,22 @@ const reminderLogSchema = new mongoose.Schema({
     type: String,
     index: true,
   },
+  recipient: {
+    type: String,
+    index: true,
+  },
+  recipientType: {
+    type: String,
+    enum: ['assignee', 'collaborator', 'owner', 'other'],
+    default: 'owner',
+    index: true,
+  },
 }, {
   timestamps: true,
 });
 
-reminderLogSchema.index({ taskId: 1, remindAt: 1 }, { unique: true });
+reminderLogSchema.index({ taskId: 1, remindAt: 1, recipient: 1 }, { unique: true });
+reminderLogSchema.index({ recipient: 1, sentAt: -1 });
 
 const ReminderLog = mongoose.model('ReminderLog', reminderLogSchema);
 

@@ -18,11 +18,16 @@ const commentSchema = new mongoose.Schema({
     default: 'default',
     index: true,
   },
+  mentions: [{
+    type: String,
+    index: true,
+  }],
 }, {
   timestamps: true,
 });
 
 commentSchema.index({ taskId: 1, createdAt: -1 });
+commentSchema.index({ mentions: 1 });
 
 const Comment = mongoose.model('Comment', commentSchema);
 
