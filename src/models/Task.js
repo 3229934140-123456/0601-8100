@@ -95,6 +95,10 @@ const taskSchema = new mongoose.Schema({
       type: Boolean,
       default: false,
     },
+    minutesBefore: {
+      type: Number,
+      default: null,
+    },
     remindAt: {
       type: Date,
       default: null,

@@ -83,6 +83,68 @@ class TaskController {
     }
   }
 
+  async batchUpdate(req, res) {
+    try {
+      const userId = req.headers['x-user-id'] || 'default';
+      const { taskIds, ...updateData } = req.body;
+      if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
+        return res.status(400).json({ error: 'taskIds must be a non-empty array' });
+      }
+      const result = await TaskService.batchUpdate(taskIds, updateData, userId);
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+
+  async batchAddTags(req, res) {
+    try {
+      const userId = req.headers['x-user-id'] || 'default';
+      const { taskIds, tags } = req.body;
+      if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
+        return res.status(400).json({ error: 'taskIds must be a non-empty array' });
+      }
+      if (!tags || !Array.isArray(tags) || tags.length === 0) {
+        return res.status(400).json({ error: 'tags must be a non-empty array' });
+      }
+      const result = await TaskService.batchAddTags(taskIds, tags, userId);
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+
+  async batchRemoveTags(req, res) {
+    try {
+      const userId = req.headers['x-user-id'] || 'default';
+      const { taskIds, tags } = req.body;
+      if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
+        return res.status(400).json({ error: 'taskIds must be a non-empty array' });
+      }
+      if (!tags || !Array.isArray(tags) || tags.length === 0) {
+        return res.status(400).json({ error: 'tags must be a non-empty array' });
+      }
+      const result = await TaskService.batchRemoveTags(taskIds, tags, userId);
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+
+  async batchDelete(req, res) {
+    try {
+      const userId = req.headers['x-user-id'] || 'default';
+      const { taskIds } = req.body;
+      if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
+        return res.status(400).json({ error: 'taskIds must be a non-empty array' });
+      }
+      const result = await TaskService.batchDelete(taskIds, userId);
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+
   async getTags(req, res) {
     try {
       const userId = req.headers['x-user-id'] || 'default';
@@ -107,8 +169,7 @@ class TaskController {
     try {
       const userId = req.headers['x-user-id'] || 'default';
       const { id } = req.params;
-      const { remindAt } = req.body;
-      const task = await ReminderService.setReminder(id, remindAt, userId);
+      const task = await ReminderService.setReminder(id, req.body, userId);
       res.json(task);
     } catch (error) {
       res.status(400).json({ error: error.message });

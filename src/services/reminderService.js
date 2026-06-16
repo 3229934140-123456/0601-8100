@@ -81,15 +81,30 @@ class ReminderService {
     console.log(`  Reminder sent at: ${new Date().toISOString()}`);
   }
 
-  async setReminder(taskId, remindAt, userId = 'default') {
+  async setReminder(taskId, reminderConfig, userId = 'default') {
     const task = await Task.findOne({ _id: taskId, userId });
     if (!task) {
       throw new Error('Task not found');
     }
 
+    const { minutesBefore, remindAt } = reminderConfig;
+    let finalRemindAt = null;
+    const finalMinutesBefore = minutesBefore || null;
+
+    if (finalMinutesBefore && task.dueDate) {
+      finalRemindAt = new Date(new Date(task.dueDate).getTime() - finalMinutesBefore * 60 * 1000);
+    } else if (remindAt) {
+      finalRemindAt = new Date(remindAt);
+    }
+
+    if (!finalRemindAt) {
+      throw new Error('Either minutesBefore with dueDate or remindAt is required');
+    }
+
     task.reminder = {
       enabled: true,
-      remindAt: new Date(remindAt),
+      minutesBefore: finalMinutesBefore,
+      remindAt: finalRemindAt,
       reminded: false,
     };
 
@@ -105,6 +120,7 @@ class ReminderService {
 
     task.reminder = {
       enabled: false,
+      minutesBefore: null,
       remindAt: null,
       reminded: false,
     };

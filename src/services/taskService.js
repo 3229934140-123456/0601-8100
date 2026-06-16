@@ -3,7 +3,7 @@ const { generateInitialRank, rankBetween, compareRanks, rebalanceRanks } = requi
 
 class TaskService {
   async createTask(taskData, userId = 'default') {
-    const { parentTask: parentTaskId, ...rest } = taskData;
+    const { parentTask: parentTaskId, reminder, ...rest } = taskData;
     
     let sortRank;
     if (parentTaskId) {
@@ -34,11 +34,31 @@ class TaskService {
       }
     }
 
+    let reminderConfig = { enabled: false, minutesBefore: null, remindAt: null, reminded: false };
+    if (reminder && reminder.enabled && rest.dueDate) {
+      const minutesBefore = reminder.minutesBefore || null;
+      let remindAt = reminder.remindAt ? new Date(reminder.remindAt) : null;
+      if (minutesBefore && rest.dueDate) {
+        remindAt = new Date(new Date(rest.dueDate).getTime() - minutesBefore * 60 * 1000);
+      }
+      if (remindAt) {
+        reminderConfig = { enabled: true, minutesBefore, remindAt, reminded: false };
+      }
+    } else if (reminder && reminder.enabled && reminder.remindAt) {
+      reminderConfig = {
+        enabled: true,
+        minutesBefore: reminder.minutesBefore || null,
+        remindAt: new Date(reminder.remindAt),
+        reminded: false,
+      };
+    }
+
     const task = new Task({
       ...rest,
       parentTask: parentTaskId || null,
       sortRank,
       userId,
+      reminder: reminderConfig,
     });
 
     await task.save();
@@ -69,7 +89,91 @@ class TaskService {
       }
     }
 
+    this.attachProgress(taskObj);
+
     return taskObj;
+  }
+
+  attachProgress(taskObj) {
+    if (taskObj.subtasks && taskObj.subtasks.length > 0) {
+      let totalAll = 0;
+      let completedAll = 0;
+      for (const sub of taskObj.subtasks) {
+        this.attachProgress(sub);
+        totalAll += (sub.progress.totalSubtasks || 0) + 1;
+        completedAll += (sub.progress.completedSubtasks || 0) + (sub.status === 'completed' ? 1 : 0);
+      }
+      taskObj.progress = {
+        totalSubtasks: totalAll,
+        completedSubtasks: completedAll,
+        uncompletedSubtasks: totalAll - completedAll,
+        completionPercentage: totalAll > 0 ? Math.round((completedAll / totalAll) * 100) : 0,
+      };
+    } else {
+      taskObj.progress = {
+        totalSubtasks: 0,
+        completedSubtasks: 0,
+        uncompletedSubtasks: 0,
+        completionPercentage: taskObj.status === 'completed' ? 100 : 0,
+      };
+    }
+    return taskObj;
+  }
+
+  async getTasksGrouped(query = {}, userId = 'default') {
+    const { status, priority, tags, search } = query;
+
+    const baseFilter = { userId };
+    if (status) baseFilter.status = status;
+    if (priority) baseFilter.priority = priority;
+    if (tags && tags.length > 0) {
+      const tagsArray = Array.isArray(tags) ? tags : [tags];
+      baseFilter.tags = { $all: tagsArray };
+    }
+    if (search) {
+      baseFilter.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const now = new Date();
+    const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date(now); todayEnd.setHours(23, 59, 59, 999);
+    const tomorrowStart = new Date(now); tomorrowStart.setDate(tomorrowStart.getDate() + 1); tomorrowStart.setHours(0, 0, 0, 0);
+    const tomorrowEnd = new Date(tomorrowStart); tomorrowEnd.setHours(23, 59, 59, 999);
+    const weekEnd = new Date(now);
+    const daysUntilSunday = 7 - now.getDay();
+    weekEnd.setDate(weekEnd.getDate() + daysUntilSunday);
+    weekEnd.setHours(23, 59, 59, 999);
+
+    const groups = {};
+
+    const overdueFilter = { ...baseFilter, dueDate: { $lt: todayStart }, status: { $nin: ['completed', 'cancelled'] } };
+    if (status) delete overdueFilter.status;
+    groups.overdue = await Task.find(overdueFilter).sort({ dueDate: 1 }).lean();
+
+    const todayFilter = { ...baseFilter, dueDate: { $gte: todayStart, $lte: todayEnd } };
+    groups.today = await Task.find(todayFilter).sort({ sortRank: 1 }).lean();
+
+    const tomorrowFilter = { ...baseFilter, dueDate: { $gte: tomorrowStart, $lte: tomorrowEnd } };
+    groups.tomorrow = await Task.find(tomorrowFilter).sort({ sortRank: 1 }).lean();
+
+    const thisWeekFilter = { ...baseFilter, dueDate: { $gt: tomorrowEnd, $lte: weekEnd } };
+    groups.thisWeek = await Task.find(thisWeekFilter).sort({ dueDate: 1 }).lean();
+
+    const noDueDateFilter = { ...baseFilter, dueDate: null };
+    groups.noDueDate = await Task.find(noDueDateFilter).sort({ sortRank: 1 }).lean();
+
+    const laterFilter = { ...baseFilter, dueDate: { $gt: weekEnd } };
+    groups.later = await Task.find(laterFilter).sort({ dueDate: 1 }).lean();
+
+    const summary = {};
+    for (const [key, tasks] of Object.entries(groups)) {
+      summary[key] = tasks.length;
+    }
+
+    return { groups, summary };
   }
 
   async getTasks(query = {}, userId = 'default') {
@@ -86,7 +190,13 @@ class TaskService {
       page = 1,
       limit = 50,
       includeSubtasks = false,
+      grouped = false,
+      includeProgress = false,
     } = query;
+
+    if (grouped) {
+      return await this.getTasksGrouped(query, userId);
+    }
 
     const filter = { userId };
     
@@ -120,6 +230,10 @@ class TaskService {
 
     const skip = (page - 1) * limit;
 
+    if (sortBy === 'progress' && !parentTask) {
+      filter.parentTask = null;
+    }
+
     const [tasks, total] = await Promise.all([
       Task.find(filter)
         .sort(sort)
@@ -129,10 +243,29 @@ class TaskService {
       Task.countDocuments(filter),
     ]);
 
-    if (includeSubtasks) {
+    if (includeSubtasks || includeProgress) {
       for (const task of tasks) {
-        task.subtasks = await this.getAllSubtasks(task._id);
+        if (includeSubtasks) {
+          task.subtasks = await this.getAllSubtasks(task._id);
+        }
+        if (includeProgress) {
+          const progress = await this.calculateTaskProgress(task._id);
+          task.progress = progress;
+        }
       }
+    }
+
+    if (sortBy === 'progress') {
+      for (const task of tasks) {
+        if (!task.progress) {
+          task.progress = await this.calculateTaskProgress(task._id);
+        }
+      }
+      tasks.sort((a, b) => {
+        const pa = a.progress.completionPercentage;
+        const pb = b.progress.completionPercentage;
+        return sortOrder === 'desc' ? pb - pa : pa - pb;
+      });
     }
 
     return {
@@ -142,6 +275,29 @@ class TaskService {
       limit: parseInt(limit),
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  async calculateTaskProgress(taskId) {
+    const allSubtasks = await this.getAllSubtasksFlat(taskId);
+    const total = allSubtasks.length;
+    const completed = allSubtasks.filter(s => s.status === 'completed').length;
+    return {
+      totalSubtasks: total,
+      completedSubtasks: completed,
+      uncompletedSubtasks: total - completed,
+      completionPercentage: total > 0 ? Math.round((completed / total) * 100) : 0,
+    };
+  }
+
+  async getAllSubtasksFlat(parentId) {
+    const directSubtasks = await Task.find({ parentTask: parentId }).lean();
+    const allSubtasks = [];
+    for (const sub of directSubtasks) {
+      allSubtasks.push(sub);
+      const nested = await this.getAllSubtasksFlat(sub._id);
+      allSubtasks.push(...nested);
+    }
+    return allSubtasks;
   }
 
   async getAllSubtasks(parentId) {
@@ -156,6 +312,106 @@ class TaskService {
     return subtasks;
   }
 
+  async batchUpdate(taskIds, updateData, userId = 'default') {
+    const results = { succeeded: [], failed: [] };
+
+    for (const taskId of taskIds) {
+      try {
+        const task = await this.updateTask(taskId, updateData, userId);
+        results.succeeded.push({ taskId, task });
+      } catch (error) {
+        results.failed.push({ taskId, error: error.message });
+      }
+    }
+
+    return {
+      total: taskIds.length,
+      succeededCount: results.succeeded.length,
+      failedCount: results.failed.length,
+      succeeded: results.succeeded.map(r => r.taskId),
+      failed: results.failed.map(r => ({ taskId: r.taskId, error: r.error })),
+    };
+  }
+
+  async batchAddTags(taskIds, tagsToAdd, userId = 'default') {
+    const results = { succeeded: [], failed: [] };
+    const tagsArray = Array.isArray(tagsToAdd) ? tagsToAdd : [tagsToAdd];
+
+    for (const taskId of taskIds) {
+      try {
+        const task = await Task.findOne({ _id: taskId, userId });
+        if (!task) {
+          results.failed.push({ taskId, error: 'Task not found' });
+          continue;
+        }
+        const currentTags = task.tags || [];
+        const newTags = [...new Set([...currentTags, ...tagsArray])];
+        task.tags = newTags;
+        await task.save();
+        results.succeeded.push(taskId);
+      } catch (error) {
+        results.failed.push({ taskId, error: error.message });
+      }
+    }
+
+    return {
+      total: taskIds.length,
+      succeededCount: results.succeeded.length,
+      failedCount: results.failed.length,
+      succeeded: results.succeeded,
+      failed: results.failed,
+    };
+  }
+
+  async batchRemoveTags(taskIds, tagsToRemove, userId = 'default') {
+    const results = { succeeded: [], failed: [] };
+    const tagsArray = Array.isArray(tagsToRemove) ? tagsToRemove : [tagsToRemove];
+
+    for (const taskId of taskIds) {
+      try {
+        const task = await Task.findOne({ _id: taskId, userId });
+        if (!task) {
+          results.failed.push({ taskId, error: 'Task not found' });
+          continue;
+        }
+        task.tags = (task.tags || []).filter(t => !tagsArray.includes(t));
+        await task.save();
+        results.succeeded.push(taskId);
+      } catch (error) {
+        results.failed.push({ taskId, error: error.message });
+      }
+    }
+
+    return {
+      total: taskIds.length,
+      succeededCount: results.succeeded.length,
+      failedCount: results.failed.length,
+      succeeded: results.succeeded,
+      failed: results.failed,
+    };
+  }
+
+  async batchDelete(taskIds, userId = 'default') {
+    const results = { succeeded: [], failed: [] };
+
+    for (const taskId of taskIds) {
+      try {
+        await this.deleteTask(taskId, userId);
+        results.succeeded.push(taskId);
+      } catch (error) {
+        results.failed.push({ taskId, error: error.message });
+      }
+    }
+
+    return {
+      total: taskIds.length,
+      succeededCount: results.succeeded.length,
+      failedCount: results.failed.length,
+      succeeded: results.succeeded,
+      failed: results.failed,
+    };
+  }
+
   async updateTask(taskId, updateData, userId = 'default') {
     const task = await Task.findOne({ _id: taskId, userId });
     if (!task) {
@@ -164,7 +420,7 @@ class TaskService {
 
     const oldStatus = task.status;
     const oldParent = task.parentTask;
-    const { status, parentTask, ...rest } = updateData;
+    const { status, parentTask, reminder, ...rest } = updateData;
 
     if (status !== undefined && status !== oldStatus) {
       task.status = status;
@@ -202,6 +458,27 @@ class TaskService {
       }
       
       task.parentTask = parentTask || null;
+    }
+
+    if (reminder !== undefined) {
+      if (reminder === null || reminder.enabled === false) {
+        task.reminder = { enabled: false, minutesBefore: null, remindAt: null, reminded: false };
+      } else if (reminder.enabled) {
+        let remindAt = reminder.remindAt ? new Date(reminder.remindAt) : null;
+        const minutesBefore = reminder.minutesBefore || null;
+        const dueDate = rest.dueDate || task.dueDate;
+        if (minutesBefore && dueDate) {
+          remindAt = new Date(new Date(dueDate).getTime() - minutesBefore * 60 * 1000);
+        }
+        if (remindAt) {
+          task.reminder = {
+            enabled: true,
+            minutesBefore,
+            remindAt,
+            reminded: false,
+          };
+        }
+      }
     }
 
     Object.assign(task, rest);

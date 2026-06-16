@@ -102,16 +102,27 @@ class RecurrenceService {
       : JSON.parse(JSON.stringify(task.recurrence));
 
     const reminderData = task.reminder;
-    let reminderConfig = { enabled: false };
+    let reminderConfig = { enabled: false, minutesBefore: null, remindAt: null, reminded: false };
     if (reminderData && reminderData.enabled) {
-      const dueTime = new Date(task.dueDate).getTime();
-      const remindTime = new Date(reminderData.remindAt).getTime();
-      const offset = dueTime - remindTime;
-      reminderConfig = {
-        enabled: true,
-        remindAt: new Date(nextDueDate.getTime() - offset),
-        reminded: false,
-      };
+      const minutesBefore = reminderData.minutesBefore || null;
+      if (minutesBefore && nextDueDate) {
+        reminderConfig = {
+          enabled: true,
+          minutesBefore,
+          remindAt: new Date(nextDueDate.getTime() - minutesBefore * 60 * 1000),
+          reminded: false,
+        };
+      } else {
+        const dueTime = new Date(task.dueDate).getTime();
+        const remindTime = reminderData.remindAt ? new Date(reminderData.remindAt).getTime() : dueTime;
+        const offset = dueTime - remindTime;
+        reminderConfig = {
+          enabled: true,
+          minutesBefore,
+          remindAt: new Date(nextDueDate.getTime() - offset),
+          reminded: false,
+        };
+      }
     }
 
     const newTask = new Task({
