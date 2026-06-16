@@ -1,7 +1,52 @@
 const Task = require('../models/Task');
+const Comment = require('../models/Comment');
+const ActivityLog = require('../models/ActivityLog');
 const { generateInitialRank, rankBetween, compareRanks, rebalanceRanks } = require('../utils/lexoRank');
 
 class TaskService {
+  async logActivity(taskId, action, details = {}, actor = 'default') {
+    try {
+      const log = new ActivityLog({
+        taskId,
+        action,
+        actor,
+        details,
+      });
+      await log.save();
+    } catch (e) {
+      // 日志记录失败不影响主流程
+    }
+  }
+
+  async getRecentActivity(taskId, limit = 20) {
+    return await ActivityLog.find({ taskId })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+  }
+
+  async getComments(taskId, limit = 50) {
+    return await Comment.find({ taskId })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+  }
+
+  async addComment(taskId, content, author = 'default', userId = 'default') {
+    const task = await Task.findOne({ _id: taskId, userId });
+    if (!task) {
+      throw new Error('Task not found');
+    }
+    const comment = new Comment({
+      taskId,
+      content,
+      author,
+    });
+    await comment.save();
+    await this.logActivity(taskId, 'comment_add', { commentId: comment._id, author, content: content.slice(0, 100) }, author);
+    return comment.toObject();
+  }
+
   async createTask(taskData, userId = 'default') {
     const { parentTask: parentTaskId, reminder, ...rest } = taskData;
     
@@ -65,7 +110,14 @@ class TaskService {
 
     if (parentTaskId) {
       await this.updateParentSubtaskCount(parentTaskId);
+      await this.logActivity(parentTaskId, 'subtask_add', { subtaskId: task._id, title: task.title }, userId);
     }
+
+    await this.logActivity(task._id, 'create', {
+      title: task.title,
+      assignee: task.assignee || null,
+      collaborators: task.collaborators || [],
+    }, userId);
 
     return await this.getTaskWithSubtasks(task._id, userId);
   }
@@ -90,6 +142,9 @@ class TaskService {
     }
 
     this.attachProgress(taskObj);
+
+    taskObj.recentActivity = await this.getRecentActivity(taskId, 20);
+    taskObj.comments = await this.getComments(taskId, 50);
 
     return taskObj;
   }
@@ -121,7 +176,7 @@ class TaskService {
   }
 
   async getTasksGrouped(query = {}, userId = 'default') {
-    const { status, priority, tags, search } = query;
+    const { status, priority, tags, search, assignee, collaborator, participant } = query;
 
     const baseFilter = { userId };
     if (status) baseFilter.status = status;
@@ -130,11 +185,28 @@ class TaskService {
       const tagsArray = Array.isArray(tags) ? tags : [tags];
       baseFilter.tags = { $all: tagsArray };
     }
-    if (search) {
+    if (assignee) baseFilter.assignee = assignee;
+    if (collaborator) baseFilter.collaborators = collaborator;
+    if (participant) {
       baseFilter.$or = [
+        { assignee: participant },
+        { collaborators: participant },
+      ];
+    }
+    if (search) {
+      const searchOr = [
         { title: { $regex: search, $options: 'i' } },
         { description: { $regex: search, $options: 'i' } },
       ];
+      if (baseFilter.$or) {
+        baseFilter.$and = [
+          { $or: baseFilter.$or },
+          { $or: searchOr },
+        ];
+        delete baseFilter.$or;
+      } else {
+        baseFilter.$or = searchOr;
+      }
     }
 
     const now = new Date();
@@ -149,8 +221,10 @@ class TaskService {
 
     const groups = {};
 
-    const overdueFilter = { ...baseFilter, dueDate: { $lt: todayStart }, status: { $nin: ['completed', 'cancelled'] } };
-    if (status) delete overdueFilter.status;
+    const overdueFilter = { ...baseFilter, dueDate: { $lt: todayStart } };
+    if (!status) {
+      overdueFilter.status = { $nin: ['completed', 'cancelled'] };
+    }
     groups.overdue = await Task.find(overdueFilter).sort({ dueDate: 1 }).lean();
 
     const todayFilter = { ...baseFilter, dueDate: { $gte: todayStart, $lte: todayEnd } };
@@ -185,6 +259,9 @@ class TaskService {
       dueDateTo,
       parentTask,
       search,
+      assignee,
+      collaborator,
+      participant,
       sortBy = 'sortRank',
       sortOrder = 'asc',
       page = 1,
@@ -208,6 +285,15 @@ class TaskService {
       const tagsArray = Array.isArray(tags) ? tags : [tags];
       filter.tags = { $all: tagsArray };
     }
+
+    if (assignee) filter.assignee = assignee;
+    if (collaborator) filter.collaborators = collaborator;
+    if (participant) {
+      filter.$or = [
+        { assignee: participant },
+        { collaborators: participant },
+      ];
+    }
     
     if (dueDateFrom || dueDateTo) {
       filter.dueDate = {};
@@ -216,16 +302,19 @@ class TaskService {
     }
     
     if (search) {
-      filter.$or = [
+      const searchOr = [
         { title: { $regex: search, $options: 'i' } },
         { description: { $regex: search, $options: 'i' } },
       ];
-    }
-
-    const sort = {};
-    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
-    if (sortBy !== 'sortRank') {
-      sort.sortRank = 1;
+      if (filter.$or) {
+        filter.$and = [
+          { $or: filter.$or },
+          { $or: searchOr },
+        ];
+        delete filter.$or;
+      } else {
+        filter.$or = searchOr;
+      }
     }
 
     const skip = (page - 1) * limit;
@@ -234,38 +323,50 @@ class TaskService {
       filter.parentTask = null;
     }
 
-    const [tasks, total] = await Promise.all([
-      Task.find(filter)
+    const total = await Task.countDocuments(filter);
+
+    let tasks;
+    if (sortBy === 'progress') {
+      const allTasks = await Task.find(filter).lean();
+      const tasksWithProgress = [];
+      for (const t of allTasks) {
+        const progress = await this.calculateTaskProgress(t._id);
+        tasksWithProgress.push({ ...t, progress });
+      }
+      tasksWithProgress.sort((a, b) => {
+        const pa = a.progress.completionPercentage;
+        const pb = b.progress.completionPercentage;
+        const diff = sortOrder === 'desc' ? pb - pa : pa - pb;
+        if (diff !== 0) return diff;
+        return compareRanks(a.sortRank, b.sortRank);
+      });
+      tasks = tasksWithProgress.slice(skip, skip + parseInt(limit));
+      if (!includeProgress) {
+        tasks = tasks.map(t => { const { progress, ...rest } = t; return rest; });
+      }
+    } else {
+      const sort = {};
+      sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+      if (sortBy !== 'sortRank') {
+        sort.sortRank = 1;
+      }
+      tasks = await Task.find(filter)
         .sort(sort)
         .skip(skip)
         .limit(parseInt(limit))
-        .lean(),
-      Task.countDocuments(filter),
-    ]);
+        .lean();
 
-    if (includeSubtasks || includeProgress) {
-      for (const task of tasks) {
-        if (includeSubtasks) {
-          task.subtasks = await this.getAllSubtasks(task._id);
-        }
-        if (includeProgress) {
-          const progress = await this.calculateTaskProgress(task._id);
-          task.progress = progress;
+      if (includeSubtasks || includeProgress) {
+        for (const task of tasks) {
+          if (includeSubtasks) {
+            task.subtasks = await this.getAllSubtasks(task._id);
+          }
+          if (includeProgress) {
+            const progress = await this.calculateTaskProgress(task._id);
+            task.progress = progress;
+          }
         }
       }
-    }
-
-    if (sortBy === 'progress') {
-      for (const task of tasks) {
-        if (!task.progress) {
-          task.progress = await this.calculateTaskProgress(task._id);
-        }
-      }
-      tasks.sort((a, b) => {
-        const pa = a.progress.completionPercentage;
-        const pb = b.progress.completionPercentage;
-        return sortOrder === 'desc' ? pb - pa : pa - pb;
-      });
     }
 
     return {
@@ -346,8 +447,12 @@ class TaskService {
         }
         const currentTags = task.tags || [];
         const newTags = [...new Set([...currentTags, ...tagsArray])];
+        const actuallyAdded = newTags.filter(t => !currentTags.includes(t));
         task.tags = newTags;
         await task.save();
+        if (actuallyAdded.length > 0) {
+          await this.logActivity(taskId, 'tags_add', { added: actuallyAdded, via: 'batch' }, userId);
+        }
         results.succeeded.push(taskId);
       } catch (error) {
         results.failed.push({ taskId, error: error.message });
@@ -374,8 +479,14 @@ class TaskService {
           results.failed.push({ taskId, error: 'Task not found' });
           continue;
         }
-        task.tags = (task.tags || []).filter(t => !tagsArray.includes(t));
+        const currentTags = task.tags || [];
+        const newTags = currentTags.filter(t => !tagsArray.includes(t));
+        const actuallyRemoved = currentTags.filter(t => tagsArray.includes(t));
+        task.tags = newTags;
         await task.save();
+        if (actuallyRemoved.length > 0) {
+          await this.logActivity(taskId, 'tags_remove', { removed: actuallyRemoved, via: 'batch' }, userId);
+        }
         results.succeeded.push(taskId);
       } catch (error) {
         results.failed.push({ taskId, error: error.message });
@@ -420,16 +531,25 @@ class TaskService {
 
     const oldStatus = task.status;
     const oldParent = task.parentTask;
-    const { status, parentTask, reminder, ...rest } = updateData;
+    const oldPriority = task.priority;
+    const oldDueDate = task.dueDate ? new Date(task.dueDate).toISOString() : null;
+    const oldAssignee = task.assignee || null;
+    const oldCollaborators = [...(task.collaborators || [])];
+    const oldTags = [...(task.tags || [])];
+    const { status, parentTask, reminder, tags, ...rest } = updateData;
 
     if (status !== undefined && status !== oldStatus) {
       task.status = status;
       if (status === 'completed') {
         task.completedAt = new Date();
         await this.completeAllSubtasks(taskId);
+        await this.logActivity(taskId, 'complete', { from: oldStatus, to: status }, userId);
       } else if (oldStatus === 'completed') {
         task.completedAt = null;
         await this.uncompleteAllSubtasks(taskId);
+        await this.logActivity(taskId, 'uncomplete', { from: oldStatus, to: status }, userId);
+      } else {
+        await this.logActivity(taskId, 'status_change', { from: oldStatus, to: status }, userId);
       }
     }
 
@@ -444,6 +564,7 @@ class TaskService {
       
       if (oldParent) {
         await this.updateParentSubtaskCount(oldParent);
+        await this.logActivity(oldParent, 'subtask_delete', { subtaskId: task._id, title: task.title }, userId);
       }
       
       const siblings = await Task.find({ parentTask: parentTask || null })
@@ -458,10 +579,16 @@ class TaskService {
       }
       
       task.parentTask = parentTask || null;
+      if (parentTask) {
+        await this.logActivity(parentTask, 'subtask_add', { subtaskId: task._id, title: task.title }, userId);
+      }
     }
 
     if (reminder !== undefined) {
       if (reminder === null || reminder.enabled === false) {
+        if (task.reminder && task.reminder.enabled) {
+          await this.logActivity(taskId, 'reminder_clear', {}, userId);
+        }
         task.reminder = { enabled: false, minutesBefore: null, remindAt: null, reminded: false };
       } else if (reminder.enabled) {
         let remindAt = reminder.remindAt ? new Date(reminder.remindAt) : null;
@@ -477,7 +604,57 @@ class TaskService {
             remindAt,
             reminded: false,
           };
+          await this.logActivity(taskId, 'reminder_set', {
+            minutesBefore,
+            remindAt: remindAt.toISOString(),
+          }, userId);
         }
+      }
+    }
+
+    if (tags !== undefined) {
+      const newTags = Array.isArray(tags) ? tags : [];
+      const added = newTags.filter(t => !oldTags.includes(t));
+      const removed = oldTags.filter(t => !newTags.includes(t));
+      task.tags = newTags;
+      if (added.length > 0) {
+        await this.logActivity(taskId, 'tags_add', { added }, userId);
+      }
+      if (removed.length > 0) {
+        await this.logActivity(taskId, 'tags_remove', { removed }, userId);
+      }
+    }
+
+    if (rest.priority !== undefined && rest.priority !== oldPriority) {
+      await this.logActivity(taskId, 'priority_change', { from: oldPriority, to: rest.priority }, userId);
+    }
+
+    if (rest.dueDate !== undefined) {
+      const newDueDate = rest.dueDate ? new Date(rest.dueDate).toISOString() : null;
+      if (newDueDate !== oldDueDate) {
+        await this.logActivity(taskId, 'due_date_change', {
+          from: oldDueDate,
+          to: newDueDate,
+        }, userId);
+      }
+    }
+
+    if (rest.assignee !== undefined && rest.assignee !== oldAssignee) {
+      await this.logActivity(taskId, 'assignee_change', {
+        from: oldAssignee,
+        to: rest.assignee || null,
+      }, userId);
+    }
+
+    if (rest.collaborators !== undefined) {
+      const newCollabs = Array.isArray(rest.collaborators) ? rest.collaborators : [];
+      const added = newCollabs.filter(c => !oldCollaborators.includes(c));
+      const removed = oldCollaborators.filter(c => !newCollabs.includes(c));
+      if (added.length > 0) {
+        await this.logActivity(taskId, 'collaborators_add', { added }, userId);
+      }
+      if (removed.length > 0) {
+        await this.logActivity(taskId, 'collaborators_remove', { removed }, userId);
       }
     }
 
@@ -596,9 +773,11 @@ class TaskService {
     const parentId = task.parentTask;
 
     await this.deleteAllSubtasks(taskId);
+    await this.logActivity(taskId, 'delete', { title: task.title, parentId: parentId || null }, userId);
     await Task.findByIdAndDelete(taskId);
 
     if (parentId) {
+      await this.logActivity(parentId, 'subtask_delete', { subtaskId: taskId, title: task.title }, userId);
       await this.updateParentSubtaskCount(parentId);
       await this.checkParentAutoComplete(parentId);
     }
@@ -620,6 +799,7 @@ class TaskService {
       throw new Error('Task not found');
     }
 
+    const originalParent = task.parentTask;
     let prevRank = null;
     let nextRank = null;
     let targetParent = null;
@@ -686,6 +866,13 @@ class TaskService {
     }
 
     await task.save();
+
+    await this.logActivity(taskId, 'move', {
+      fromParent: originalParent ? originalParent.toString() : null,
+      toParent: targetParent ? targetParent.toString() : null,
+      prevTaskId: prevTaskId || null,
+      nextTaskId: nextTaskId || null,
+    }, userId);
 
     if (task.parentTask) {
       await this.updateParentSubtaskCount(task.parentTask);

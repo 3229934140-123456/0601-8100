@@ -218,6 +218,46 @@ class TaskController {
     }
   }
 
+  async addComment(req, res) {
+    try {
+      const userId = req.headers['x-user-id'] || 'default';
+      const author = req.headers['x-author'] || userId;
+      const { id } = req.params;
+      const { content } = req.body;
+      if (!content || !content.trim()) {
+        return res.status(400).json({ error: 'Comment content is required' });
+      }
+      const comment = await TaskService.addComment(id, content.trim(), author, userId);
+      res.status(201).json(comment);
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+
+  async getComments(req, res) {
+    try {
+      const userId = req.headers['x-user-id'] || 'default';
+      const { id } = req.params;
+      const { limit = 50 } = req.query;
+      const comments = await TaskService.getComments(id, parseInt(limit));
+      res.json({ comments, count: comments.length });
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+
+  async getActivity(req, res) {
+    try {
+      const userId = req.headers['x-user-id'] || 'default';
+      const { id } = req.params;
+      const { limit = 50 } = req.query;
+      const activity = await TaskService.getRecentActivity(id, parseInt(limit));
+      res.json({ activity, count: activity.length });
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+
   async getStats(req, res) {
     try {
       const userId = req.headers['x-user-id'] || 'default';

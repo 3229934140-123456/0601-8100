@@ -22,5 +22,8 @@ router.post('/:id/complete', TaskController.completeTask);
 router.post('/:id/reminder', TaskController.setReminder);
 router.delete('/:id/reminder', TaskController.clearReminder);
 router.get('/:id/reminders', TaskController.getReminderHistory);
+router.post('/:id/comments', TaskController.addComment);
+router.get('/:id/comments', TaskController.getComments);
+router.get('/:id/activity', TaskController.getActivity);
 
 module.exports = router;

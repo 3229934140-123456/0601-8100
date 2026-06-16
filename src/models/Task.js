@@ -113,6 +113,14 @@ const taskSchema = new mongoose.Schema({
     default: 'default',
     index: true,
   },
+  assignee: {
+    type: String,
+    default: null,
+    index: true,
+  },
+  collaborators: [{
+    type: String,
+  }],
 }, {
   timestamps: true,
 });
@@ -123,6 +131,8 @@ taskSchema.index({ userId: 1, priority: 1 });
 taskSchema.index({ tags: 1 });
 taskSchema.index({ 'reminder.enabled': 1, 'reminder.remindAt': 1, 'reminder.reminded': 1 });
 taskSchema.index({ 'recurrence.enabled': 1, dueDate: 1 });
+taskSchema.index({ assignee: 1 });
+taskSchema.index({ collaborators: 1 });
 
 taskSchema.virtual('subtasks', {
   ref: 'Task',
